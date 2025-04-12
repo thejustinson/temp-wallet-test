@@ -6,23 +6,64 @@ import { QRCodeSVG } from 'qrcode.react';
 import { motion, AnimatePresence } from 'framer-motion';
 
 const DEVNET_ENDPOINT = 'https://api.devnet.solana.com';
-const SELLER_ADDRESS = '9RKnB9eWaBxX33spWTLm2333nE5QXgWfaC8BoS5Cj9Pf';
-const REQUIRED_AMOUNT = 0.05; // SOL
+const DEFAULT_SELLER_ADDRESS = '9RKnB9eWaBxX33spWTLm2333nE5QXgWfaC8BoS5Cj9Pf';
+const DEFAULT_AMOUNT = 0.01; // SOL
 const PAYMENT_WINDOW = 5 * 60; // 5 minutes in seconds
 const POLLING_INTERVAL = 5000; // 5 seconds in milliseconds
 
 export default function Home() {
   const [tempWallet, setTempWallet] = useState<Keypair | null>(null);
   const [timeLeft, setTimeLeft] = useState(PAYMENT_WINDOW);
-  const [status, setStatus] = useState<'waiting' | 'received' | 'forwarding' | 'forwarded' | 'expired'>('waiting');
+  const [status, setStatus] = useState<'setup' | 'waiting' | 'received' | 'forwarding' | 'forwarded' | 'expired'>('setup');
   const [balance, setBalance] = useState(0);
   const [txSignature, setTxSignature] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
+  const [sellerAddress, setSellerAddress] = useState(DEFAULT_SELLER_ADDRESS);
+  const [addressError, setAddressError] = useState<string | null>(null);
+  const [amount, setAmount] = useState(DEFAULT_AMOUNT.toString());
+  const [amountError, setAmountError] = useState<string | null>(null);
 
   const connection = useMemo(() => new Connection(DEVNET_ENDPOINT), []);
 
-  const generateNewWallet = useCallback(() => {
+  const validateAddress = useCallback((address: string) => {
+    try {
+      new PublicKey(address);
+      return true;
+    } catch {
+      return false;
+    }
+  }, []);
+
+  const validateAmount = useCallback((value: string) => {
+    const numValue = parseFloat(value);
+    if (isNaN(numValue)) {
+      return 'Amount must be a valid number';
+    }
+    if (numValue <= 0) {
+      return 'Amount must be greater than 0';
+    }
+    if (numValue > 100) {
+      return 'Amount must be less than or equal to 100 SOL';
+    }
+    return null;
+  }, []);
+
+  const startPaymentFlow = useCallback(() => {
+    setAddressError(null);
+    setAmountError(null);
+
+    if (!validateAddress(sellerAddress)) {
+      setAddressError('Invalid Solana address');
+      return;
+    }
+
+    const amountError = validateAmount(amount);
+    if (amountError) {
+      setAmountError(amountError);
+      return;
+    }
+
     const newWallet = Keypair.generate();
     setTempWallet(newWallet);
     setTimeLeft(PAYMENT_WINDOW);
@@ -30,11 +71,14 @@ export default function Home() {
     setBalance(0);
     setTxSignature(null);
     setError(null);
-  }, []);
+  }, [sellerAddress, amount, validateAddress, validateAmount]);
 
-  useEffect(() => {
-    generateNewWallet();
-  }, [generateNewWallet]);
+  const resetFlow = useCallback(() => {
+    setStatus('setup');
+    setTempWallet(null);
+    setError(null);
+    setTxSignature(null);
+  }, []);
 
   useEffect(() => {
     if (!tempWallet || status !== 'waiting') return;
@@ -62,14 +106,15 @@ export default function Home() {
         const balanceInSol = balance / LAMPORTS_PER_SOL;
         setBalance(balanceInSol);
 
-        if (balanceInSol >= REQUIRED_AMOUNT) {
+        const requiredAmount = parseFloat(amount);
+        if (balanceInSol >= requiredAmount) {
           setStatus('received');
           setStatus('forwarding');
           try {
             const transaction = new Transaction().add(
               SystemProgram.transfer({
                 fromPubkey: tempWallet.publicKey,
-                toPubkey: new PublicKey(SELLER_ADDRESS),
+                toPubkey: new PublicKey(sellerAddress),
                 lamports: balance - 5000
               })
             );
@@ -81,7 +126,7 @@ export default function Home() {
             setStatus('forwarded');
           } catch (err) {
             setError('Failed to forward payment: ' + (err as Error).message);
-            setStatus('waiting'); // Reset to waiting state if forwarding fails
+            setStatus('waiting');
           }
         }
       } catch (err) {
@@ -91,7 +136,7 @@ export default function Home() {
 
     const interval = setInterval(checkBalance, POLLING_INTERVAL);
     return () => clearInterval(interval);
-  }, [tempWallet, status, connection]);
+  }, [tempWallet, status, connection, sellerAddress, amount]);
 
   const handleCopy = async (text: string) => {
     try {
@@ -103,24 +148,11 @@ export default function Home() {
     }
   };
 
-  if (!tempWallet) {
-    return (
-      <motion.div
-        initial={{ opacity: 0 }}
-        animate={{ opacity: 1 }}
-        className="flex items-center justify-center min-h-screen p-4"
-      >
-        <div className="card p-6">
-          <div className="animate-spin h-8 w-8 border-4 border-blue-500 border-t-transparent rounded-full mb-4"></div>
-          <span className="text-gray-600">Initializing wallet...</span>
-        </div>
-      </motion.div>
-    );
-  }
-
-  const progress = (timeLeft / PAYMENT_WINDOW) * 100;
-  const minutes = Math.floor(timeLeft / 60);
-  const seconds = timeLeft % 60;
+  const handleAmountChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const value = e.target.value.trim();
+    setAmount(value);
+    setAmountError(null);
+  };
 
   const getStatusColor = (status: string) => {
     switch (status) {
@@ -138,7 +170,8 @@ export default function Home() {
       case 'received': return 'Payment Received';
       case 'forwarding': return 'Forwarding Payment';
       case 'forwarded': return 'Payment Complete';
-      default: return 'Payment Expired';
+      case 'expired': return 'Payment Expired';
+      default: return 'Setup Payment';
     }
   };
 
@@ -146,7 +179,7 @@ export default function Home() {
     <motion.main 
       initial={{ opacity: 0 }}
       animate={{ opacity: 1 }}
-      className="min-h-screen py-12 px-4"
+      className="min-h-screen py-6 px-4 sm:py-12"
     >
       <div className="max-w-5xl mx-auto">
         <motion.div
@@ -161,13 +194,76 @@ export default function Home() {
         </motion.div>
 
         <AnimatePresence mode="wait">
-          {status === 'forwarding' ? (
+          {status === 'setup' ? (
+            <motion.div
+              key="setup"
+              initial={{ opacity: 0, y: 20 }}
+              animate={{ opacity: 1, y: 0 }}
+              exit={{ opacity: 0, y: -20 }}
+              className="card p-6 sm:p-8 max-w-xl mx-auto"
+            >
+              <h2 className="text-lg font-semibold text-gray-900 mb-4">Payment Setup</h2>
+              <div className="space-y-4">
+                <div>
+                  <label htmlFor="seller-address" className="block text-sm font-medium text-gray-700 mb-1">
+                    Seller Address
+                  </label>
+                  <div className="mt-1">
+                    <input
+                      type="text"
+                      id="seller-address"
+                      value={sellerAddress}
+                      onChange={(e) => {
+                        setSellerAddress(e.target.value);
+                        setAddressError(null);
+                      }}
+                      className="block w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-1 focus:ring-blue-500 focus:border-blue-500 sm:text-sm"
+                      placeholder="Enter Solana address"
+                    />
+                    {addressError && (
+                      <p className="mt-1 text-sm text-red-600">{addressError}</p>
+                    )}
+                  </div>
+                </div>
+                <div>
+                  <label htmlFor="amount" className="block text-sm font-medium text-gray-700 mb-1">
+                    Amount (SOL)
+                  </label>
+                  <div className="mt-1">
+                    <input
+                      type="number"
+                      id="amount"
+                      value={amount}
+                      onChange={handleAmountChange}
+                      step="0.000001"
+                      min="0.000001"
+                      max="100"
+                      className="block w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-1 focus:ring-blue-500 focus:border-blue-500 sm:text-sm"
+                      placeholder="Enter amount in SOL"
+                    />
+                    {amountError && (
+                      <p className="mt-1 text-sm text-red-600">{amountError}</p>
+                    )}
+                  </div>
+                  <p className="mt-1 text-xs text-gray-500">
+                    Enter an amount between 0 and 100 SOL
+                  </p>
+                </div>
+                <button
+                  onClick={startPaymentFlow}
+                  className="w-full py-2 px-4 border border-transparent rounded-md shadow-sm text-sm font-medium text-white bg-blue-600 hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500"
+                >
+                  Start Payment Flow
+                </button>
+              </div>
+            </motion.div>
+          ) : status === 'forwarding' ? (
             <motion.div
               key="forwarding"
               initial={{ opacity: 0, y: 20 }}
               animate={{ opacity: 1, y: 0 }}
               exit={{ opacity: 0, y: -20 }}
-              className="card p-8 text-center"
+              className="card p-6 sm:p-8 text-center"
             >
               <div className="flex flex-col items-center justify-center gap-4">
                 <div className="animate-spin h-8 w-8 border-4 border-blue-500 border-t-transparent rounded-full"></div>
@@ -184,47 +280,55 @@ export default function Home() {
               className="card"
             >
               <div className="grid md:grid-cols-2 divide-y md:divide-y-0 md:divide-x">
-                <div className="p-6">
-                  <div className="flex justify-between items-center mb-6">
+                <div className="p-4 sm:p-6">
+                  <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center mb-6 gap-2">
                     <h2 className="text-lg font-semibold text-gray-900">Payment Details</h2>
                     <div className="flex items-center gap-2">
                       <div className={`h-2.5 w-2.5 rounded-full ${getStatusColor(status)}`} />
-                      <span className="text-sm text-gray-600 capitalize">{getStatusText(status)}</span>
+                      <span className="text-sm text-gray-600">{getStatusText(status)}</span>
                     </div>
                   </div>
 
                   <div className="space-y-4">
                     <div className="flex justify-between items-center py-2 border-b">
                       <span className="text-gray-600">Required Amount</span>
-                      <span className="font-mono font-medium">{REQUIRED_AMOUNT} SOL</span>
+                      <span className="font-mono font-medium">{parseFloat(amount).toFixed(6)} SOL</span>
                     </div>
                     <div className="flex justify-between items-center py-2 border-b">
                       <span className="text-gray-600">Current Balance</span>
-                      <span className="font-mono font-medium">{balance.toFixed(4)} SOL</span>
+                      <span className="font-mono font-medium">{balance.toFixed(6)} SOL</span>
                     </div>
                     <div className="flex justify-between items-center py-2 border-b">
                       <span className="text-gray-600">Time Remaining</span>
                       <span className="font-mono font-medium">
-                        {minutes}:{seconds.toString().padStart(2, '0')}
+                        {Math.floor(timeLeft / 60)}:{(timeLeft % 60).toString().padStart(2, '0')}
+                      </span>
+                    </div>
+                    <div className="flex justify-between items-center py-2 border-b">
+                      <span className="text-gray-600">Seller Address</span>
+                      <span className="font-mono font-medium text-sm truncate max-w-[200px]" title={sellerAddress}>
+                        {sellerAddress.slice(0, 4)}...{sellerAddress.slice(-4)}
                       </span>
                     </div>
                   </div>
 
-                  <div className="mt-6">
-                    <div className="h-1 w-full bg-gray-100 rounded-full">
-                      <motion.div
-                        className="h-1 bg-blue-500 rounded-full"
-                        style={{ width: `${progress}%` }}
-                        transition={{ duration: 1 }}
-                      />
+                  {status === 'waiting' && (
+                    <div className="mt-6">
+                      <div className="h-1 w-full bg-gray-100 rounded-full">
+                        <motion.div
+                          className="h-1 bg-blue-500 rounded-full"
+                          style={{ width: `${(timeLeft / PAYMENT_WINDOW) * 100}%` }}
+                          transition={{ duration: 1 }}
+                        />
+                      </div>
                     </div>
-                  </div>
+                  )}
                 </div>
 
-                <div className="p-6 flex flex-col items-center justify-center">
-                  <div className="bg-gray-50 p-6 rounded-xl mb-4">
+                <div className="p-4 sm:p-6 flex flex-col items-center justify-center">
+                  <div className="bg-gray-50 p-4 sm:p-6 rounded-xl mb-4">
                     <QRCodeSVG 
-                      value={tempWallet.publicKey.toString()} 
+                      value={tempWallet?.publicKey.toString() || ''}
                       size={180}
                       level="H"
                       includeMargin={true}
@@ -234,7 +338,7 @@ export default function Home() {
                     <div className="flex items-center justify-between">
                       <p className="text-sm text-gray-600">Wallet Address:</p>
                       <motion.button
-                        onClick={() => handleCopy(tempWallet.publicKey.toString())}
+                        onClick={() => handleCopy(tempWallet?.publicKey.toString() || '')}
                         className="flex items-center gap-1 px-2 py-1 text-sm text-gray-500 hover:bg-gray-100 rounded-md"
                         whileTap={{ scale: 0.95 }}
                         title="Copy address"
@@ -282,7 +386,7 @@ export default function Home() {
                     </div>
                     <div className="w-full bg-gray-50 p-3 rounded-lg border border-gray-100">
                       <p className="font-mono text-sm break-all text-gray-600">
-                        {tempWallet.publicKey.toString()}
+                        {tempWallet?.publicKey.toString()}
                       </p>
                     </div>
                   </div>
@@ -294,7 +398,7 @@ export default function Home() {
 
         {status === 'forwarded' && (
           <motion.div 
-            className="card p-6"
+            className="card p-6 sm:p-8 mt-6"
             initial={{ opacity: 0, y: 20 }}
             animate={{ opacity: 1, y: 0 }}
           >
@@ -315,7 +419,7 @@ export default function Home() {
 
         {(status === 'forwarded' || status === 'expired') && (
           <motion.button
-            onClick={generateNewWallet}
+            onClick={resetFlow}
             className="w-full mt-6 py-3 px-4 bg-white border border-gray-200 text-gray-900 rounded-xl font-medium hover:bg-gray-50 transition-colors"
             whileHover={{ scale: 1.01 }}
             whileTap={{ scale: 0.99 }}
